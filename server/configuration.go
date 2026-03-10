@@ -138,6 +138,10 @@ type ClientConfig struct {
 	GroupCallsAllowed bool
 	// When set to true it enables experimental support for using the data channel for signaling.
 	EnableDCSignaling *bool
+	// Cloudflare Calls App ID
+	CloudflareCallsAppID string
+	// Cloudflare Calls App Token (secret)
+	CloudflareCallsAppToken string `json:"-"`
 }
 
 const (
@@ -456,6 +460,9 @@ func (c *configuration) Clone() *configuration {
 		cfg.EnableDCSignaling = model.NewPointer(*c.EnableDCSignaling)
 	}
 
+	cfg.CloudflareCallsAppID = c.CloudflareCallsAppID
+	cfg.CloudflareCallsAppToken = c.CloudflareCallsAppToken
+
 	return &cfg
 }
 
@@ -711,6 +718,14 @@ func (p *Plugin) setOverrides(cfg *configuration) {
 	cfg.TCPServerAddress = strings.TrimSpace(cfg.TCPServerAddress)
 	cfg.RTCDServiceURL = strings.TrimSpace(cfg.RTCDServiceURL)
 	cfg.JobServiceURL = strings.TrimSpace(cfg.JobServiceURL)
+
+	if appID := os.Getenv("MM_CALLS_CLOUDFLARE_APP_ID"); appID != "" {
+		cfg.CloudflareCallsAppID = appID
+	}
+	
+	if appToken := os.Getenv("MM_CALLS_CLOUDFLARE_APP_TOKEN"); appToken != "" {
+		cfg.CloudflareCallsAppToken = appToken
+	}
 }
 
 func (p *Plugin) isSingleHandler() bool {
