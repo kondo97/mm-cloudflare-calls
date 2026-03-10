@@ -485,6 +485,13 @@ func (p *Plugin) removeSession(us *session) error {
 		return nil
 	}
 
+	// Cloudflare: セッション削除前にスクリーントラックが残っていればクリーンアップ
+	if p.isCloudflareBackend() {
+		if _, loaded := p.screenTrackNames.LoadAndDelete(us.originalConnID); loaded {
+			p.LogDebug("cleaned up screen track names on session removal", "originalConnID", us.originalConnID)
+		}
+	}
+
 	if err := p.store.DeleteCallCloudflareSession(us.originalConnID); err != nil {
 		p.LogError("failed to delete cloudflare session", "originalConnID", us.originalConnID, "err", err.Error())
 	}

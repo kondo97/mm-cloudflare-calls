@@ -487,6 +487,363 @@ func (p *Plugin) handleRenegotiateMessage(mmSessionID string, data []byte) error
 	return nil
 }
 
+// handlePushTracksMessage は既存の Cloudflare セッションに新しいトラック（画面共有等）を
+// push し、他の参加者にそのトラックを pull させる。
+func (p *Plugin) handlePushTracksMessage(msg rtc.Message, callID string) error {
+	apiBase, err := p.cloudflareAPIBase()
+	if err != nil {
+		return fmt.Errorf("cloudflare not configured: %w", err)
+	}
+	authHeader, err := p.cloudflareAuthHeader()
+	if err != nil {
+		return fmt.Errorf("cloudflare not configured: %w", err)
+	}
+
+	// msg.Data のパース
+	var dataMap map[string]interface{}
+	if err := json.Unmarshal(msg.Data, &dataMap); err != nil {
+		return fmt.Errorf("failed to unmarshal push_tracks data: %w", err)
+	}
+
+	// SDP の取得とデコード
+	sdpBase64, ok := dataMap["sdp"].(string)
+	if !ok {
+		return fmt.Errorf("missing 'sdp' field in push_tracks data")
+	}
+	sdpJSONBytes, err := base64.StdEncoding.DecodeString(sdpBase64)
+	if err != nil {
+		return fmt.Errorf("failed to decode base64 sdp: %w", err)
+	}
+	var sdpObj map[string]interface{}
+	if err := json.Unmarshal(sdpJSONBytes, &sdpObj); err != nil {
+		return fmt.Errorf("failed to unmarshal sdp json: %w", err)
+	}
+	sdpStr, _ := sdpObj["sdp"].(string)
+	if sdpStr == "" {
+		return fmt.Errorf("missing 'sdp' field in SDP JSON")
+	}
+
+	// tracks の取得
+	tracks, ok := dataMap["tracks"].([]interface{})
+	if !ok {
+		return fmt.Errorf("missing 'tracks' field in push_tracks data")
+	}
+	trackList := make([]map[string]interface{}, 0, len(tracks))
+	for _, track := range tracks {
+		trackMap, ok := track.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		location, _ := trackMap["location"].(string)
+		mid, _ := trackMap["mid"].(string)
+		trackName, _ := trackMap["trackName"].(string)
+		trackList = append(trackList, map[string]interface{}{
+			"location":  location,
+			"mid":       mid,
+			"trackName": trackName,
+		})
+	}
+
+	// DB から既存の Cloudflare セッションを取得
+	cfSession, err := p.store.GetCallCloudflareSession(msg.SessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get cloudflare session: %w", err)
+	}
+	cfSessionID := cfSession.CloudflareCallSessionID
+
+	// Cloudflare tracks/new に SDP + tracks を送信
+	reqBody := map[string]interface{}{
+		"sessionDescription": map[string]interface{}{
+			"type": "offer",
+			"sdp":  sdpStr,
+		},
+		"tracks": trackList,
+	}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal push_tracks request: %w", err)
+	}
+
+	client := &http.Client{}
+	req, err := http.NewRequest("POST", apiBase+"/sessions/"+cfSessionID+"/tracks/new", bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create push_tracks request: %w", err)
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", authHeader)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute push_tracks request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read push_tracks response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("unexpected status %d from push_tracks: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// push レスポンスから新トラック名を取得
+	var pushResp map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &pushResp); err != nil {
+		return fmt.Errorf("failed to unmarshal push response: %w", err)
+	}
+	var pushedTrackNames []string
+	if respTracks, ok := pushResp["tracks"].([]interface{}); ok {
+		for _, rt := range respTracks {
+			if rtMap, ok := rt.(map[string]interface{}); ok {
+				if tn, ok := rtMap["trackName"].(string); ok && tn != "" {
+					pushedTrackNames = append(pushedTrackNames, tn)
+				}
+			}
+		}
+	}
+
+	// スクリーントラック名を保存（screen_off 時のクリーンアップ用）
+	if len(pushedTrackNames) > 0 {
+		p.screenTrackNames.Store(msg.SessionID, pushedTrackNames)
+	}
+
+	// answer をクライアントへ送信
+	us := p.getSessionByOriginalID(msg.SessionID)
+	if us == nil {
+		return fmt.Errorf("session not found: %s", msg.SessionID)
+	}
+	p.publishWebSocketEvent(wsEventSignal, map[string]interface{}{
+		"data":   string(bodyBytes),
+		"connID": msg.SessionID,
+	}, &WebSocketBroadcast{ConnectionID: us.connID, ReliableClusterSend: true})
+
+	// 他の参加者に新トラックを pull させる
+	if len(pushedTrackNames) > 0 {
+		existingSessions, err := p.store.GetCallCloudflareSessions(callID)
+		if err != nil {
+			p.LogError("failed to get sessions for pull", "err", err.Error())
+		} else {
+			for _, existingSession := range existingSessions {
+				if existingSession.MMSessionID == msg.SessionID {
+					continue
+				}
+				existingUS := p.getSessionByOriginalID(existingSession.MMSessionID)
+				if existingUS == nil {
+					continue
+				}
+				pullTracks := make([]map[string]interface{}, 0, len(pushedTrackNames))
+				for _, trackName := range pushedTrackNames {
+					pullTracks = append(pullTracks, map[string]interface{}{
+						"location":  "remote",
+						"sessionId": cfSessionID,
+						"trackName": trackName,
+					})
+				}
+				if err := p.pullTracksForSession(apiBase, authHeader, existingSession.CloudflareCallSessionID, pullTracks, existingUS); err != nil {
+					p.LogError("failed to pull screen tracks for session", "err", err.Error())
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// cloudflareTrackInfo は Cloudflare セッションのトラック詳細情報
+type cloudflareTrackInfo struct {
+	Location  string
+	Mid       string
+	TrackName string
+	SessionID string
+	Status    string
+}
+
+// getCloudflareSessionTracksDetailed は指定 CF セッションの全トラック詳細情報を返す
+func (p *Plugin) getCloudflareSessionTracksDetailed(apiBase, authHeader, cfSessionID string) ([]cloudflareTrackInfo, error) {
+	req, err := http.NewRequest("GET", apiBase+"/sessions/"+cfSessionID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create get session request: %w", err)
+	}
+	req.Header.Add("Authorization", authHeader)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute get session request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status %d from get session: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read get session response: %w", err)
+	}
+
+	var sessionInfo map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &sessionInfo); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal session info: %w", err)
+	}
+
+	var tracks []cloudflareTrackInfo
+	if tracksRaw, ok := sessionInfo["tracks"].([]interface{}); ok {
+		for _, t := range tracksRaw {
+			if tMap, ok := t.(map[string]interface{}); ok {
+				info := cloudflareTrackInfo{}
+				info.Location, _ = tMap["location"].(string)
+				info.Mid, _ = tMap["mid"].(string)
+				info.TrackName, _ = tMap["trackName"].(string)
+				info.SessionID, _ = tMap["sessionId"].(string)
+				info.Status, _ = tMap["status"].(string)
+				tracks = append(tracks, info)
+			}
+		}
+	}
+	return tracks, nil
+}
+
+// closeCloudflareSessionTracks は指定 CF セッションのトラックを閉じる
+// force=true の場合はデータフローのみ停止し、WebRTC 再ネゴシエーションは不要
+func (p *Plugin) closeCloudflareSessionTracks(apiBase, authHeader, cfSessionID string, mids []string, force bool) error {
+	if len(mids) == 0 {
+		return nil
+	}
+
+	tracks := make([]map[string]string, 0, len(mids))
+	for _, mid := range mids {
+		tracks = append(tracks, map[string]string{"mid": mid})
+	}
+
+	reqBody := map[string]interface{}{
+		"tracks": tracks,
+		"force":  force,
+	}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal close tracks request: %w", err)
+	}
+
+	req, err := http.NewRequest("PUT", apiBase+"/sessions/"+cfSessionID+"/tracks/close", bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create close tracks request: %w", err)
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", authHeader)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute close tracks request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status %d from close tracks: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	return nil
+}
+
+// handleScreenOffCloudflare は画面共有停止時に Cloudflare SFU のスクリーントラックを閉じる。
+// 1. 共有者の CF セッションからローカルのスクリーントラックを force close
+// 2. 他参加者の CF セッションからプル済みのスクリーントラックを force close
+// 3. 保存済みのスクリーントラック名をクリア
+func (p *Plugin) handleScreenOffCloudflare(mmSessionID, callID string) error {
+	apiBase, err := p.cloudflareAPIBase()
+	if err != nil {
+		return fmt.Errorf("cloudflare not configured: %w", err)
+	}
+	authHeader, err := p.cloudflareAuthHeader()
+	if err != nil {
+		return fmt.Errorf("cloudflare not configured: %w", err)
+	}
+
+	// 保存済みのスクリーントラック名を取得
+	screenTrackNamesVal, ok := p.screenTrackNames.LoadAndDelete(mmSessionID)
+	if !ok {
+		p.LogDebug("no screen track names found for session", "mmSessionID", mmSessionID)
+		return nil
+	}
+	screenTrackNamesList, ok := screenTrackNamesVal.([]string)
+	if !ok || len(screenTrackNamesList) == 0 {
+		return nil
+	}
+
+	screenTrackNamesSet := make(map[string]bool, len(screenTrackNamesList))
+	for _, tn := range screenTrackNamesList {
+		screenTrackNamesSet[tn] = true
+	}
+
+	// 共有者の CF セッションを取得
+	cfSession, err := p.store.GetCallCloudflareSession(mmSessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get cloudflare session: %w", err)
+	}
+	cfSessionID := cfSession.CloudflareCallSessionID
+
+	// 共有者のセッションからスクリーントラックの mid を特定して閉じる
+	sharerTracks, err := p.getCloudflareSessionTracksDetailed(apiBase, authHeader, cfSessionID)
+	if err != nil {
+		p.LogError("failed to get sharer session tracks", "err", err.Error())
+	} else {
+		var midsToClose []string
+		for _, t := range sharerTracks {
+			if t.Location == "local" && screenTrackNamesSet[t.TrackName] {
+				midsToClose = append(midsToClose, t.Mid)
+			}
+		}
+		if len(midsToClose) > 0 {
+			if err := p.closeCloudflareSessionTracks(apiBase, authHeader, cfSessionID, midsToClose, true); err != nil {
+				p.LogError("failed to close sharer screen tracks", "err", err.Error())
+			} else {
+				p.LogDebug("closed sharer screen tracks", "mids", midsToClose, "cfSessionID", cfSessionID)
+			}
+		}
+	}
+
+	// 他参加者のセッションからプル済みスクリーントラックを閉じる
+	allSessions, err := p.store.GetCallCloudflareSessions(callID)
+	if err != nil {
+		p.LogError("failed to get all cloudflare sessions", "err", err.Error())
+		return nil
+	}
+
+	for _, sess := range allSessions {
+		if sess.MMSessionID == mmSessionID {
+			continue
+		}
+
+		participantTracks, err := p.getCloudflareSessionTracksDetailed(apiBase, authHeader, sess.CloudflareCallSessionID)
+		if err != nil {
+			p.LogError("failed to get participant session tracks", "err", err.Error(), "cfSessionID", sess.CloudflareCallSessionID)
+			continue
+		}
+
+		var remoteMidsToClose []string
+		for _, t := range participantTracks {
+			// remote トラックで、共有者のセッションから来たスクリーントラックを特定
+			if t.Location == "remote" && t.SessionID == cfSessionID && screenTrackNamesSet[t.TrackName] {
+				remoteMidsToClose = append(remoteMidsToClose, t.Mid)
+			}
+		}
+
+		if len(remoteMidsToClose) > 0 {
+			if err := p.closeCloudflareSessionTracks(apiBase, authHeader, sess.CloudflareCallSessionID, remoteMidsToClose, true); err != nil {
+				p.LogError("failed to close remote screen tracks", "err", err.Error(), "cfSessionID", sess.CloudflareCallSessionID)
+			} else {
+				p.LogDebug("closed remote screen tracks", "mids", remoteMidsToClose, "cfSessionID", sess.CloudflareCallSessionID)
+			}
+		}
+	}
+
+	return nil
+}
+
 func (p *Plugin) handleAddUser(msg rtc.Message, callID string) error {
 	apiBase, err := p.cloudflareAPIBase()
 	if err != nil {

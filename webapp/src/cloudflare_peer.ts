@@ -129,14 +129,25 @@ export class CloudflareRTCPeer extends EventEmitter {
     }
   }
 
-  public addScreenStream(stream: MediaStream) {
+  public async addScreenStream(stream: MediaStream): Promise<{transceivers: RTCRtpTransceiver[], offer: RTCSessionDescription}> {
     if (!this.pc) {
       throw new Error('peer has been destroyed already');
     }
+    const newTransceivers: RTCRtpTransceiver[] = [];
     for (const track of stream.getTracks()) {
       const transceiver = this.pc.addTransceiver(track, {direction: 'sendonly'});
       this.transceivers.push(transceiver);
+      newTransceivers.push(transceiver);
     }
+
+    // Create renegotiation offer with new screen tracks
+    const offer = await this.pc.createOffer();
+    await this.pc.setLocalDescription(offer);
+
+    return {
+      transceivers: newTransceivers,
+      offer: this.pc.localDescription!,
+    };
   }
 
   public removeScreenTrack(trackID: string) {

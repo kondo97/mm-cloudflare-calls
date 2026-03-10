@@ -262,7 +262,7 @@ export default class CloudflareCallsClient extends EventEmitter {
         peer.on('answer', renegotiateHandler);
 
         peer.on('addUser', (transceivers: RTCRtpTransceiver[]) => {
-            ws.send('addUser', {
+          ws.send('add_user', {
                 tracks: transceivers.map(({mid, sender}) => ({
                     location: 'local',
                     mid,
@@ -282,10 +282,32 @@ export default class CloudflareCallsClient extends EventEmitter {
             this.streams.push(remoteStream);
 
             if (remoteStream.getAudioTracks().length > 0) {
-                this.remoteVoiceTracks.push(...remoteStream.getAudioTracks());
+                for (const track of remoteStream.getAudioTracks()) {
+                    if (this.remoteVoiceTracks.some((existingTrack) => existingTrack.id === track.id)) {
+                        continue;
+                    }
+
+                    track.onended = () => {
+                        this.remoteVoiceTracks = this.remoteVoiceTracks.filter(
+                            (existingTrack) => existingTrack.id !== track.id,
+                        );
+                    };
+
+                    this.remoteVoiceTracks.push(track);
+                }
+
                 this.emit('remoteVoiceStream', remoteStream);
-            } else if (remoteStream.getVideoTracks().length > 0) {
-                this.remoteScreenTrack = remoteStream.getVideoTracks()[0];
+            }
+
+            if (remoteStream.getVideoTracks().length > 0) {
+                const remoteScreenTrack = remoteStream.getVideoTracks()[0];
+                remoteScreenTrack.onended = () => {
+                    if (this.remoteScreenTrack?.id === remoteScreenTrack.id) {
+                        this.remoteScreenTrack = null;
+                    }
+                };
+
+                this.remoteScreenTrack = remoteScreenTrack;
                 this.emit('remoteScreenStream', remoteStream);
             }
         });
@@ -457,7 +479,7 @@ export default class CloudflareCallsClient extends EventEmitter {
     this.emit('close', err);
   }
 
-  public setScreenStream(screenStream: MediaStream) {
+  public async setScreenStream(screenStream: MediaStream) {
     if (!this.ws || !this.peer || this.localScreenTrack || !screenStream) {
       return;
     }
@@ -466,6 +488,10 @@ export default class CloudflareCallsClient extends EventEmitter {
     this.localScreenTrack = screenTrack;
 
     const screenAudioTrack = screenStream.getAudioTracks()[0];
+    if (screenAudioTrack) {
+      logDebug('screen sharing with audio', screenAudioTrack);
+    }
+
     const stream = screenAudioTrack
       ? new MediaStream([screenTrack, screenAudioTrack])
       : new MediaStream([screenTrack]);
@@ -480,12 +506,34 @@ export default class CloudflareCallsClient extends EventEmitter {
       if (!this.ws || !this.peer) {
         return;
       }
+
       this.peer.removeScreenTrack(screenTrack.id);
+      if (screenAudioTrack) {
+        this.peer.removeScreenTrack(screenAudioTrack.id);
+      }
+
       this.ws.send('screen_off');
     };
 
     logDebug('adding screen stream to peer', stream.id);
-    this.peer.addScreenStream(stream);
+
+    try {
+      const {transceivers, offer} = await this.peer.addScreenStream(stream);
+      const payload = JSON.stringify(offer);
+
+      // Send push_tracks with SDP + track info so the server can push to Cloudflare
+      // and pull the new tracks for other participants
+      this.ws.send('push_tracks', {
+        tracks: transceivers.map(({mid, sender}) => ({
+          location: 'local',
+          mid,
+          trackName: sender.track?.id,
+        })),
+        sdp: zlibSync(strToU8(payload)),
+      }, true);
+    } catch (err) {
+      logErr('failed to add screen stream', err);
+    }
 
     this.ws.send('screen_on', {
       data: JSON.stringify({screenStreamID: stream.id}),
@@ -504,7 +552,7 @@ export default class CloudflareCallsClient extends EventEmitter {
       return null;
     }
 
-    this.setScreenStream(screenStream);
+    await this.setScreenStream(screenStream);
     return screenStream;
   }
 

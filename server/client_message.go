@@ -30,8 +30,9 @@ const (
 	clientMessageTypeCaption     = "caption"
 	clientMessageTypeMetric      = "metric"
 	clientMessageTypeCallState   = "call_state"
-	clientMessageTypeAddUser		 = "add_user"
-	clientMessageTypeRenegotiate = "renegotiate"
+	clientMessageTypeAddUser		  = "add_user"
+	clientMessageTypeRenegotiate  = "renegotiate"
+	clientMessageTypePushTracks   = "push_tracks"
 )
 
 func (m *clientMessage) ToJSON() ([]byte, error) {
@@ -62,6 +63,7 @@ var validClientMessageTypes = map[string]bool{
 	clientMessageTypeCallState:   true,
 	clientMessageTypeAddUser:     true,
 	clientMessageTypeRenegotiate: true,
+	clientMessageTypePushTracks:  true,
 	"ping":                       true, // Special case: standard ping message
 }
 

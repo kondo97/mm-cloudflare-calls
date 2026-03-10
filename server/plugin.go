@@ -79,6 +79,10 @@ type Plugin struct {
 	// Batchers
 	addSessionsBatchers    map[string]*batching.Batcher
 	removeSessionsBatchers map[string]*batching.Batcher
+
+	// screenTrackNames stores mmSessionID -> []string (trackNames pushed as screen share)
+	// Used to close Cloudflare screen tracks on screen_off.
+	screenTrackNames sync.Map
 }
 
 func (p *Plugin) startSession(us *session, senderID string, props rtc.SessionProps) {

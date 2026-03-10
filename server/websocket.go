@@ -223,7 +223,16 @@ func (p *Plugin) handleClientMessageTypeScreen(us *session, msg clientMessage, h
 		wsMsgType = wsEventUserScreenOff
 	}
 
-	if p.rtcServer != nil || p.rtcdManager != nil {
+	if p.isCloudflareBackend() {
+		// Cloudflare バックエンド: screen_off 時にスクリーントラックを閉じる
+		if msg.Type == clientMessageTypeScreenOff {
+			go func() {
+				if err := p.handleScreenOffCloudflare(us.originalConnID, us.callID); err != nil {
+					p.LogError("failed to handle screen off for cloudflare", "error", err.Error())
+				}
+			}()
+		}
+	} else if p.rtcServer != nil || p.rtcdManager != nil {
 		if handlerID != p.nodeID {
 			if err := p.sendClusterMessage(clusterMessage{
 				ConnID:        us.originalConnID,
@@ -473,6 +482,17 @@ func (p *Plugin) handleClientMsg(us *session, msg clientMessage, handlerID strin
 		}
 		if err := p.handleAddUser(rtcMsg, us.callID); err != nil {
 			return fmt.Errorf("failed to handle add user: %w", err)
+		}
+	case clientMessageTypePushTracks:
+		if p.isCloudflareBackend() {
+			rtcMsg := rtc.Message{
+				SessionID: us.originalConnID,
+				Type:      rtc.SDPMessage,
+				Data:      msg.Data,
+			}
+			if err := p.handlePushTracksMessage(rtcMsg, us.callID); err != nil {
+				return fmt.Errorf("failed to handle push_tracks: %w", err)
+			}
 		}
 	case clientMessageTypeRenegotiate:
 		if err := p.handleRenegotiateMessage(us.originalConnID, msg.Data); err != nil {
@@ -1413,6 +1433,31 @@ func (p *Plugin) WebSocketMessageHasBeenPosted(connID, userID string, req *model
 		})
 		if err != nil {
 			p.LogError("failed to marshal renegotiate data", "error", err)
+			return
+		}
+		msg.Data = data
+	case clientMessageTypePushTracks:
+		sdp, ok := req.Data["sdp"].([]byte)
+		if !ok {
+			p.LogError("invalid or missing sdp data for push_tracks")
+			return
+		}
+		unpackedSDP, err := unpackSDPData(sdp)
+		if err != nil {
+			p.LogError("failed to unpack sdp for push_tracks", "error", err)
+			return
+		}
+		tracks, ok := req.Data["tracks"].([]interface{})
+		if !ok {
+			p.LogError("invalid or missing tracks data for push_tracks")
+			return
+		}
+		data, err := json.Marshal(map[string]interface{}{
+			"sdp":    unpackedSDP,
+			"tracks": tracks,
+		})
+		if err != nil {
+			p.LogError("failed to marshal push_tracks data", "error", err)
 			return
 		}
 		msg.Data = data
