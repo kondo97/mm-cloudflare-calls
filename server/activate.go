@@ -151,7 +151,10 @@ func (p *Plugin) OnActivate() (retErr error) {
 	// Which one is used is decided here, during activation.
 	// We first check if RTCD is configured and allowed by the license. If so
 	// we try to initialize its connection and fail to start the plugin if that errors.
-	if rtcdURL := cfg.getRTCDURL(); rtcdURL != "" && p.licenseChecker.RTCDAllowed() {
+	// If Cloudflare Calls is configured, we skip both RTCD and the embedded RTC server entirely.
+	if cfg.CloudflareCallsAppID != "" && cfg.CloudflareCallsAppToken != "" {
+		p.LogInfo("using Cloudflare Calls backend")
+	} else if rtcdURL := cfg.getRTCDURL(); rtcdURL != "" && p.licenseChecker.RTCDAllowed() {
 		rtcdManager, err := p.newRTCDClientManager(rtcdURL)
 		if err != nil {
 			err = fmt.Errorf("failed to create rtcd manager: %w", err)
