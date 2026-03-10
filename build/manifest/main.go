@@ -149,7 +149,14 @@ func findManifest() (*model.Manifest, error) {
 		}
 	}
 	if version == "" {
-		version = BuildTagLatest + "+" + BuildHashShort
+		if BuildTagLatest != "" {
+			version = BuildTagLatest + "+" + BuildHashShort
+		} else {
+			version = "0.0.0"
+			if BuildHashShort != "" {
+				version += "+" + BuildHashShort
+			}
+		}
 	}
 	if strings.HasPrefix(version, "v") {
 		version = version[1:]
@@ -157,7 +164,9 @@ func findManifest() (*model.Manifest, error) {
 	manifest.Version = version
 
 	// Update the release notes url to point at the latest tag.
-	manifest.ReleaseNotesURL = manifest.HomepageURL + "releases/tag/" + BuildTagLatest
+	if BuildTagLatest != "" {
+		manifest.ReleaseNotesURL = manifest.HomepageURL + "releases/tag/" + BuildTagLatest
+	}
 
 	return &manifest, nil
 }

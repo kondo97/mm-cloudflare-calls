@@ -199,6 +199,16 @@ func (cs *callState) getHostID(botID string) string {
 	return host.UserID
 }
 
+func (cs *callState) sessionsForUser(userID string) []*public.CallSession {
+	var sessions []*public.CallSession
+	for _, session := range cs.sessions {
+		if session.UserID == userID {
+			sessions = append(sessions, session)
+		}
+	}
+	return sessions
+}
+
 func (cs *callState) isUserIDInCall(userID string) bool {
 	for _, session := range cs.sessions {
 		if session.UserID == userID {
