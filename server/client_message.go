@@ -60,6 +60,8 @@ var validClientMessageTypes = map[string]bool{
 	clientMessageTypeCaption:     true,
 	clientMessageTypeMetric:      true,
 	clientMessageTypeCallState:   true,
+	clientMessageTypeAddUser:     true,
+	clientMessageTypeRenegotiate: true,
 	"ping":                       true, // Special case: standard ping message
 }
 
