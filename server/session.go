@@ -485,6 +485,10 @@ func (p *Plugin) removeSession(us *session) error {
 		return nil
 	}
 
+	if err := p.store.DeleteCallCloudflareSession(us.originalConnID); err != nil {
+		p.LogError("failed to delete cloudflare session", "originalConnID", us.originalConnID, "err", err.Error())
+	}
+
 	sessionsCount, err := p.store.GetCallSessionsCount(us.callID, db.GetCallSessionOpts{})
 	if err != nil {
 		p.LogError("failed to get call sessions count", "callID", us.callID, "err", err.Error())
