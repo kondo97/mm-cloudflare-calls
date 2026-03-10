@@ -49,6 +49,10 @@ type Store interface {
 	GetPost(postID string) (*model.Post, error)
 	UpdateFileInfoPostID(fileID, channelID, postID string) error
 	KVGet(pluginID, key string, fromWriter bool) ([]byte, error)
+	CreateCallCloudflareSession(session *public.CallCloudflareSession) error
+	GetCallCloudflareSession(mmSessionID string) (*public.CallCloudflareSession, error)
+	GetCallCloudflareSessions(callID string) ([]*public.CallCloudflareSession, error)
+	DeleteCallCloudflareSession(mmSessionID string) error
 }
 
 type RTCDClient interface {
