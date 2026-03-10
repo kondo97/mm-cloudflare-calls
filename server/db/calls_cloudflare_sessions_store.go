@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mattermost/mattermost/mattermost-plugin-calls/server/public"
+	"github.com/mattermost/mattermost-plugin-calls/server/public"
 
 	sq "github.com/mattermost/squirrel"
 )

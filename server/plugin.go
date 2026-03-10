@@ -81,6 +81,13 @@ type Plugin struct {
 	removeSessionsBatchers map[string]*batching.Batcher
 }
 
+// isCloudflareBackend returns whether the Cloudflare Calls backend is being used.
+// If both rtcServer and rtcdManager are nil, the Cloudflare backend is selected.
+func (p *Plugin) isCloudflareBackend() bool {
+	cfg := p.getConfiguration()
+	return cfg != nil && cfg.CloudflareCallsAppID != "" && cfg.CloudflareCallsAppToken != ""
+}
+
 func (p *Plugin) startSession(us *session, senderID string, props rtc.SessionProps) {
 	cfg := rtc.SessionConfig{
 		GroupID:   "default",
